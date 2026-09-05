@@ -1,0 +1,1067 @@
+// TravelBudy 2.0 — Global Travel Commerce Platform
+// Modular monolith data model. Every org-owned record carries a tenant key
+// (organizationId / supplierId) enforced at the query layer — never trust the client.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// PLATFORM CONFIG (config-driven, no hard-coded country logic)
+// ─────────────────────────────────────────────────────────────
+
+model Country {
+  id         String   @id @default(cuid())
+  code       String   @unique // ISO 3166-1 alpha-2, e.g. ZM
+  name       String
+  currencyId String
+  currency   Currency @relation(fields: [currencyId], references: [id])
+  timezone   String // e.g. Africa/Lusaka
+  taxRules   Json? // country-specific tax config
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  destinations  Destination[]
+  suppliers     Supplier[]
+  organizations Organization[]
+
+  @@map("countries")
+}
+
+model Currency {
+  id            String    @id @default(cuid())
+  code          String    @unique // ISO 4217, e.g. ZMW
+  name          String
+  symbol        String
+  decimalPlaces Int       @default(2)
+  isActive      Boolean   @default(true)
+  countries     Country[]
+
+  @@map("currencies")
+}
+
+model Language {
+  id       String  @id @default(cuid())
+  code     String  @unique // ISO 639-1, e.g. en
+  name     String
+  isActive Boolean @default(true)
+
+  @@map("languages")
+}
+
+// ─────────────────────────────────────────────────────────────
+// IDENTITY, RBAC & MULTI-TENANCY
+// ─────────────────────────────────────────────────────────────
+
+enum OrganizationType {
+  AGENCY
+  SUPPLIER
+  PLATFORM
+}
+
+model Organization {
+  id        String           @id @default(cuid())
+  type      OrganizationType
+  name      String
+  slug      String           @unique
+  countryId String?
+  country   Country?         @relation(fields: [countryId], references: [id])
+  branding  Json? // logo, colors, custom domain
+  isDemo    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  members   OrganizationMember[]
+  suppliers Supplier[]
+  leads     Lead[]
+  customers Customer[]
+  quotes    Quote[]
+  proposals Proposal[]
+  bookings  Booking[]
+  tasks     Task[]
+  campaigns Campaign[]
+  wallet    Wallet?
+
+  @@map("organizations")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  phone        String?
+  passwordHash String?
+  name         String
+  avatarUrl    String?
+  isDemo       Boolean   @default(false)
+  mfaEnabled   Boolean   @default(false)
+  mfaSecret    String?
+  status       String    @default("active") // active | suspended
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  memberships              OrganizationMember[]
+  roles                    UserRole[]
+  customerProfile          Customer?
+  auditLogs                AuditLog[]
+  notifications            Notification[]
+  conversationParticipants ConversationParticipant[]
+  messages                 Message[]
+  reviews                  Review[]
+  tasksAssigned            Task[]                    @relation("TaskAssignee")
+
+  @@map("users")
+}
+
+model OrganizationMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title          String? // e.g. Agency Owner, Senior Agent
+  isOwner        Boolean      @default(false)
+  status         String       @default("active")
+  createdAt      DateTime     @default(now())
+
+  roles UserRole[]
+
+  @@unique([organizationId, userId])
+  @@map("organization_members")
+}
+
+model Role {
+  id          String  @id @default(cuid())
+  key         String  @unique // e.g. agency_owner, agent, super_admin
+  name        String
+  description String?
+  isSystem    Boolean @default(true)
+
+  permissions RolePermission[]
+  userRoles   UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(cuid())
+  key         String  @unique // e.g. booking.view, payment.refund
+  description String?
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id                   String              @id @default(cuid())
+  userId               String
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId               String
+  role                 Role                @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  organizationMemberId String?
+  organizationMember   OrganizationMember? @relation(fields: [organizationMemberId], references: [id], onDelete: Cascade)
+  supplierStaffId      String?
+  supplierStaff        SupplierStaff?      @relation(fields: [supplierStaffId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId, organizationMemberId, supplierStaffId])
+  @@map("user_roles")
+}
+
+// ─────────────────────────────────────────────────────────────
+// CUSTOMERS (traveller-facing CRM records, tenant-scoped)
+// ─────────────────────────────────────────────────────────────
+
+model Customer {
+  id             String        @id @default(cuid())
+  organizationId String? // owning agency CRM (null for direct-platform travellers)
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  userId         String?       @unique // linked traveller account, if registered
+  user           User?         @relation(fields: [userId], references: [id])
+  fullName       String
+  email          String?
+  phone          String?
+  nationality    String?
+  dateOfBirth    DateTime?
+  notes          String?
+  isDemo         Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  preferences CustomerPreference?
+  documents   CustomerDocument[]
+  leads       Lead[]
+  quotes      Quote[]
+  proposals   Proposal[]
+  bookings    Booking[]
+  reviews     Review[]
+  tasks       Task[]
+
+  @@map("customers")
+}
+
+model CustomerPreference {
+  id         String   @id @default(cuid())
+  customerId String   @unique
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  data       Json // travel style, dietary, seating, budget range, etc.
+  updatedAt  DateTime @updatedAt
+
+  @@map("customer_preferences")
+}
+
+model CustomerDocument {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type       String // passport | visa | insurance | invoice | voucher | itinerary | ticket
+  fileUrl    String
+  isPrivate  Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  @@map("customer_documents")
+}
+
+// ─────────────────────────────────────────────────────────────
+// DESTINATIONS & SUPPLIERS
+// ─────────────────────────────────────────────────────────────
+
+model Destination {
+  id           String   @id @default(cuid())
+  countryId    String
+  country      Country  @relation(fields: [countryId], references: [id])
+  name         String
+  slug         String   @unique
+  description  String?
+  heroImageUrl String?
+  categories   String[] // safari, beach, adventure, luxury, honeymoon, family, business, cultural, wildlife, weekend
+  isFeatured   Boolean  @default(false)
+  isDemo       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  products Product[]
+
+  @@map("destinations")
+}
+
+enum SupplierType {
+  HOTEL
+  LODGE
+  TOUR_OPERATOR
+  SAFARI_OPERATOR
+  ACTIVITY_PROVIDER
+  TRANSFER_COMPANY
+  CAR_RENTAL
+  EXPERIENCE_PROVIDER
+}
+
+enum VerificationStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  INFORMATION_REQUIRED
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+model Supplier {
+  id                 String             @id @default(cuid())
+  organizationId     String
+  organization       Organization       @relation(fields: [organizationId], references: [id])
+  countryId          String
+  country            Country            @relation(fields: [countryId], references: [id])
+  type               SupplierType
+  businessName       String
+  slug               String             @unique
+  logoUrl            String?
+  coverImageUrl      String?
+  about              String?
+  location           String?
+  yearsOperating     Int?
+  verificationStatus VerificationStatus @default(DRAFT)
+  badges             String[] // verified, licensed, preferred_partner
+  trustScore         Int                @default(0) // 0-100, computed internally
+  isDemo             Boolean            @default(false)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  staff       SupplierStaff[]
+  documents   SupplierDocument[]
+  licences    SupplierLicence[]
+  products    Product[]
+  reviews     Review[]
+  wallet      Wallet?
+  settlements Settlement[]
+
+  @@map("suppliers")
+}
+
+model SupplierStaff {
+  id               String   @id @default(cuid())
+  supplierId       String
+  supplier         Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  userId           String
+  permissionsGroup String // reservations | finance | operations | manager
+  status           String   @default("active")
+  createdAt        DateTime @default(now())
+
+  roles UserRole[]
+
+  @@unique([supplierId, userId])
+  @@map("supplier_staff")
+}
+
+model SupplierDocument {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  type       String // business_registration | tax | insurance | id | bank | other
+  fileUrl    String
+  status     String   @default("submitted")
+  createdAt  DateTime @default(now())
+
+  @@map("supplier_documents")
+}
+
+model SupplierLicence {
+  id            String    @id @default(cuid())
+  supplierId    String
+  supplier      Supplier  @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  licenceNumber String
+  issuingBody   String?
+  expiresAt     DateTime?
+  fileUrl       String?
+  createdAt     DateTime  @default(now())
+
+  @@map("supplier_licences")
+}
+
+// ─────────────────────────────────────────────────────────────
+// CATALOG: PRODUCTS, PACKAGES, INVENTORY, RATES
+// ─────────────────────────────────────────────────────────────
+
+enum ProductType {
+  HOTEL
+  TOUR
+  SAFARI
+  ACTIVITY
+  TRANSFER
+  EXPERIENCE
+  PACKAGE
+}
+
+enum ProductStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  SUSPENDED
+  ARCHIVED
+}
+
+model Product {
+  id                 String        @id @default(cuid())
+  supplierId         String
+  supplier           Supplier      @relation(fields: [supplierId], references: [id])
+  destinationId      String?
+  destination        Destination?  @relation(fields: [destinationId], references: [id])
+  type               ProductType
+  title              String
+  slug               String        @unique
+  summary            String?
+  description        String?
+  categories         String[]
+  media              Json? // gallery array
+  itinerary          Json? // day-by-day
+  inclusions         String[]
+  exclusions         String[]
+  cancellationPolicy String?
+  termsAndConditions String?
+  status             ProductStatus @default(DRAFT)
+  basePrice          Decimal       @default(0)
+  currencyCode       String        @default("ZMW")
+  durationDays       Int?
+  ratingAverage      Decimal       @default(0)
+  ratingCount        Int           @default(0)
+  isDemo             Boolean       @default(false)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  options      ProductOption[]
+  availability Availability[]
+  rates        Rate[]
+  reviews      Review[]
+  bookingItems BookingItem[]
+
+  @@map("products")
+}
+
+model ProductOption {
+  id          String   @id @default(cuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name        String // e.g. "Deluxe Room", "Private Guide"
+  description String?
+  priceDelta  Decimal  @default(0)
+  createdAt   DateTime @default(now())
+
+  @@map("product_options")
+}
+
+model Inventory {
+  id          String   @id @default(cuid())
+  productId   String
+  date        DateTime
+  totalUnits  Int
+  bookedUnits Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@unique([productId, date])
+  @@map("inventory")
+}
+
+model Availability {
+  id         String   @id @default(cuid())
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  startDate  DateTime
+  endDate    DateTime
+  capacity   Int?
+  isBlackout Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@map("availability")
+}
+
+model Rate {
+  id           String    @id @default(cuid())
+  productId    String
+  product      Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name         String // e.g. "Standard", "Peak Season"
+  startDate    DateTime?
+  endDate      DateTime?
+  price        Decimal
+  currencyCode String    @default("ZMW")
+  createdAt    DateTime  @default(now())
+
+  @@map("rates")
+}
+
+// ─────────────────────────────────────────────────────────────
+// CRM: LEADS, QUOTES, PROPOSALS, TASKS
+// ─────────────────────────────────────────────────────────────
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  QUOTED
+  NEGOTIATION
+  BOOKED
+  COMPLETED
+  LOST
+}
+
+model Lead {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  customerId      String?
+  customer        Customer?    @relation(fields: [customerId], references: [id])
+  name            String
+  contact         String?
+  destination     String?
+  travelDates     Json? // { from, to }
+  travellerCount  Int?
+  budget          Decimal?
+  travelType      String?
+  preferences     String?
+  source          String? // website | referral | import | ad
+  assignedAgentId String?
+  status          LeadStatus   @default(NEW)
+  isDemo          Boolean      @default(false)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  quotes Quote[]
+  tasks  Task[]
+
+  @@map("leads")
+}
+
+model Quote {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  leadId         String?
+  lead           Lead?        @relation(fields: [leadId], references: [id])
+  customerId     String?
+  customer       Customer?    @relation(fields: [customerId], references: [id])
+  agentUserId    String?
+  currencyCode   String       @default("ZMW")
+  subtotal       Decimal      @default(0)
+  taxAmount      Decimal      @default(0)
+  discountAmount Decimal      @default(0)
+  totalAmount    Decimal      @default(0)
+  status         String       @default("draft") // draft | sent | accepted | declined | expired
+  isDemo         Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  lineItems QuoteLineItem[]
+  proposal  Proposal?
+
+  @@map("quotes")
+}
+
+model QuoteLineItem {
+  id           String   @id @default(cuid())
+  quoteId      String
+  quote        Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  productId    String?
+  description  String
+  quantity     Int      @default(1)
+  unitPrice    Decimal
+  markupAmount Decimal  @default(0)
+  commission   Decimal  @default(0)
+  discount     Decimal  @default(0)
+  subtotal     Decimal
+  createdAt    DateTime @default(now())
+
+  @@map("quote_line_items")
+}
+
+model Proposal {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  quoteId         String       @unique
+  quote           Quote        @relation(fields: [quoteId], references: [id])
+  customerId      String
+  customer        Customer     @relation(fields: [customerId], references: [id])
+  title           String
+  coverImageUrl   String?
+  itinerary       Json?
+  paymentSchedule Json?
+  status          String       @default("draft") // draft | sent | viewed | accepted | declined
+  secureToken     String       @unique @default(cuid())
+  sentAt          DateTime?
+  viewedAt        DateTime?
+  acceptedAt      DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  booking Booking?
+
+  @@map("proposals")
+}
+
+model Task {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  leadId         String?
+  lead           Lead?        @relation(fields: [leadId], references: [id])
+  customerId     String?
+  customer       Customer?    @relation(fields: [customerId], references: [id])
+  assigneeId     String?
+  assignee       User?        @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  title          String
+  dueAt          DateTime?
+  status         String       @default("open") // open | done | cancelled
+  createdAt      DateTime     @default(now())
+
+  @@map("tasks")
+}
+
+// ─────────────────────────────────────────────────────────────
+// BOOKING ENGINE
+// ─────────────────────────────────────────────────────────────
+
+enum BookingStatus {
+  INQUIRY
+  QUOTE
+  PENDING
+  PAYMENT_REQUIRED
+  PARTIALLY_PAID
+  CONFIRMED
+  TRAVEL_IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  REFUND_REQUESTED
+  REFUNDED
+  EXPIRED
+}
+
+model Booking {
+  id              String        @id @default(cuid())
+  reference       String        @unique // TRV-YYYY-NNNNNN
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  customerId      String
+  customer        Customer      @relation(fields: [customerId], references: [id])
+  proposalId      String?       @unique
+  proposal        Proposal?     @relation(fields: [proposalId], references: [id])
+  status          BookingStatus @default(INQUIRY)
+  currencyCode    String        @default("ZMW")
+  totalAmount     Decimal       @default(0)
+  paidAmount      Decimal       @default(0)
+  travelStartDate DateTime?
+  travelEndDate   DateTime?
+  isDemo          Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  items        BookingItem[]
+  travellers   Traveller[]
+  vouchers     Voucher[]
+  itineraries  Itinerary[]
+  payments     Payment[]
+  commissions  Commission[]
+  reviews      Review[]
+  disputes     Dispute[]
+  statusEvents BookingStatusEvent[]
+
+  @@map("bookings")
+}
+
+model BookingStatusEvent {
+  id        String        @id @default(cuid())
+  bookingId String
+  booking   Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  status    BookingStatus
+  note      String?
+  createdAt DateTime      @default(now())
+
+  @@map("booking_status_events")
+}
+
+model BookingItem {
+  id          String    @id @default(cuid())
+  bookingId   String
+  booking     Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  productId   String?
+  product     Product?  @relation(fields: [productId], references: [id])
+  description String
+  quantity    Int       @default(1)
+  unitPrice   Decimal
+  subtotal    Decimal
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@map("booking_items")
+}
+
+model Traveller {
+  id               String    @id @default(cuid())
+  bookingId        String
+  booking          Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  fullName         String
+  nationality      String?
+  dateOfBirth      DateTime?
+  passportNumber   String?
+  specialRequests  String?
+  dietaryNeeds     String?
+  emergencyContact Json?
+  createdAt        DateTime  @default(now())
+
+  @@map("travellers")
+}
+
+model Voucher {
+  id        String   @id @default(cuid())
+  bookingId String
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  type      String // invoice | voucher | itinerary | ticket | insurance | other
+  fileUrl   String
+  createdAt DateTime @default(now())
+
+  @@map("vouchers")
+}
+
+model Itinerary {
+  id        String   @id @default(cuid())
+  bookingId String
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  dayNumber Int
+  title     String
+  details   String?
+  items     Json? // flight | hotel | transfer | activity | experience
+  createdAt DateTime @default(now())
+
+  @@map("itineraries")
+}
+
+// ─────────────────────────────────────────────────────────────
+// PAYMENTS, COMMISSIONS, PAYOUTS, WALLETS
+// ─────────────────────────────────────────────────────────────
+
+model Payment {
+  id           String   @id @default(cuid())
+  bookingId    String
+  booking      Booking  @relation(fields: [bookingId], references: [id])
+  provider     String // stripe | flutterwave | mobile_money | manual
+  providerRef  String? // tokenized reference — never raw card data
+  amount       Decimal
+  currencyCode String   @default("ZMW")
+  status       String   @default("pending") // pending | completed | failed | refunded
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  transactions PaymentTransaction[]
+  refunds      Refund[]
+
+  @@map("payments")
+}
+
+model PaymentTransaction {
+  id        String   @id @default(cuid())
+  paymentId String
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  event     String // authorized | captured | failed | webhook_received
+  payload   Json?
+  createdAt DateTime @default(now())
+
+  @@map("payment_transactions")
+}
+
+model Refund {
+  id        String   @id @default(cuid())
+  paymentId String
+  payment   Payment  @relation(fields: [paymentId], references: [id])
+  amount    Decimal
+  reason    String?
+  status    String   @default("pending")
+  createdAt DateTime @default(now())
+
+  @@map("refunds")
+}
+
+model CommissionRule {
+  id         String   @id @default(cuid())
+  name       String
+  scope      String // global | product | supplier | agent | destination | promotional
+  scopeRefId String?
+  type       String // percentage | fixed
+  value      Decimal
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  commissions Commission[]
+
+  @@map("commission_rules")
+}
+
+model Commission {
+  id               String          @id @default(cuid())
+  bookingId        String
+  booking          Booking         @relation(fields: [bookingId], references: [id])
+  organizationId   String? // agent's agency
+  commissionRuleId String?
+  commissionRule   CommissionRule? @relation(fields: [commissionRuleId], references: [id])
+  amount           Decimal
+  status           String          @default("pending") // pending | available | paid
+  createdAt        DateTime        @default(now())
+
+  @@map("commissions")
+}
+
+model Payout {
+  id             String   @id @default(cuid())
+  organizationId String
+  amount         Decimal
+  currencyCode   String   @default("ZMW")
+  status         String   @default("pending") // pending | processing | completed | failed
+  createdAt      DateTime @default(now())
+
+  @@map("payouts")
+}
+
+model Settlement {
+  id           String   @id @default(cuid())
+  supplierId   String
+  supplier     Supplier @relation(fields: [supplierId], references: [id])
+  grossRevenue Decimal
+  platformFees Decimal
+  netAmount    Decimal
+  status       String   @default("pending") // pending | processing | completed
+  periodStart  DateTime
+  periodEnd    DateTime
+  createdAt    DateTime @default(now())
+
+  @@map("settlements")
+}
+
+model Wallet {
+  id             String        @id @default(cuid())
+  organizationId String?       @unique
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  supplierId     String?       @unique
+  supplier       Supplier?     @relation(fields: [supplierId], references: [id])
+  balance        Decimal       @default(0)
+  currencyCode   String        @default("ZMW")
+
+  transactions WalletTransaction[]
+
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id        String   @id @default(cuid())
+  walletId  String
+  wallet    Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  amount    Decimal
+  type      String // credit | debit
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@map("wallet_transactions")
+}
+
+// ─────────────────────────────────────────────────────────────
+// COMMUNICATION
+// ─────────────────────────────────────────────────────────────
+
+model Conversation {
+  id        String   @id @default(cuid())
+  subject   String?
+  channel   String // platform | whatsapp | email | sms
+  status    String   @default("open") // open | assigned | closed
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@map("conversations")
+}
+
+model ConversationParticipant {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id])
+  role           String? // agent | customer | supplier | admin
+
+  @@unique([conversationId, userId])
+  @@map("conversation_participants")
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String?
+  sender         User?        @relation(fields: [senderId], references: [id])
+  body           String?
+  isInternalNote Boolean      @default(false)
+  readAt         DateTime?
+  createdAt      DateTime     @default(now())
+
+  attachments Attachment[]
+
+  @@map("messages")
+}
+
+model Attachment {
+  id        String   @id @default(cuid())
+  messageId String
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  fileUrl   String
+  fileType  String?
+  createdAt DateTime @default(now())
+
+  @@map("attachments")
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String // new_lead | new_booking | payment_received | ... (see notification engine spec)
+  channel   String // in_app | email | sms | whatsapp
+  title     String
+  body      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────
+// TRUST: REVIEWS, DISPUTES, FRAUD, AUDIT
+// ─────────────────────────────────────────────────────────────
+
+model Review {
+  id                  String    @id @default(cuid())
+  bookingId           String // only completed bookings may review — enforced in service layer
+  booking             Booking   @relation(fields: [bookingId], references: [id])
+  productId           String?
+  product             Product?  @relation(fields: [productId], references: [id])
+  supplierId          String?
+  supplier            Supplier? @relation(fields: [supplierId], references: [id])
+  customerId          String?
+  customer            Customer? @relation(fields: [customerId], references: [id])
+  authorUserId        String?
+  author              User?     @relation(fields: [authorUserId], references: [id])
+  overallRating       Int
+  serviceRating       Int?
+  valueRating         Int?
+  communicationRating Int?
+  isVerified          Boolean   @default(true)
+  comment             String?
+  createdAt           DateTime  @default(now())
+
+  @@map("reviews")
+}
+
+model Dispute {
+  id         String   @id @default(cuid())
+  bookingId  String
+  booking    Booking  @relation(fields: [bookingId], references: [id])
+  reason     String
+  status     String   @default("open") // open | investigating | resolved | escalated
+  resolution String? // refund | partial_refund | credit | reject | escalate
+  evidence   Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("disputes")
+}
+
+model FraudRisk {
+  id         String   @id @default(cuid())
+  entityType String // booking | payment | user | supplier
+  entityId   String
+  riskScore  Int
+  signals    Json?
+  createdAt  DateTime @default(now())
+
+  @@map("fraud_risk")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  action     String // e.g. booking.cancel, user.impersonate
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MARKETING & GROWTH
+// ─────────────────────────────────────────────────────────────
+
+model Campaign {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  channel        String // email | whatsapp
+  segment        Json?
+  status         String       @default("draft") // draft | scheduled | sent
+  createdAt      DateTime     @default(now())
+
+  @@map("campaigns")
+}
+
+model Promotion {
+  id         String    @id @default(cuid())
+  name       String
+  type       String // discount | featured_placement
+  value      Decimal?
+  scope      String? // product | supplier | destination
+  scopeRefId String?
+  startsAt   DateTime?
+  endsAt     DateTime?
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+
+  @@map("promotions")
+}
+
+model Coupon {
+  id            String    @id @default(cuid())
+  code          String    @unique
+  discountType  String // percentage | fixed
+  discountValue Decimal
+  usageLimit    Int?
+  usedCount     Int       @default(0)
+  expiresAt     DateTime?
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+
+  @@map("coupons")
+}
+
+// ─────────────────────────────────────────────────────────────
+// PLATFORM / INTEGRATIONS
+// ─────────────────────────────────────────────────────────────
+
+model Subscription {
+  id               String    @id @default(cuid())
+  organizationId   String
+  plan             String
+  status           String    @default("active")
+  currentPeriodEnd DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@map("subscriptions")
+}
+
+model APIKey {
+  id             String    @id @default(cuid())
+  organizationId String?
+  label          String
+  hashedKey      String    @unique
+  scopes         String[]
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@map("api_keys")
+}
+
+model Webhook {
+  id             String   @id @default(cuid())
+  organizationId String?
+  url            String
+  events         String[] // e.g. booking.created, payment.completed
+  secret         String
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  @@map("webhooks")
+}
+
+model Integration {
+  id        String   @id @default(cuid())
+  provider  String // whatsapp_business | flutterwave | stripe | sendgrid
+  config    Json?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("integrations")
+}
