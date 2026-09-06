@@ -1,20 +1,9 @@
-import { NextResponse } from "next/server";
-import { auth } from "@/auth";
+import NextAuth from "next-auth";
+import { authConfig } from "@/auth.config";
 
-const PROTECTED_PREFIXES = ["/agent", "/supplier", "/admin", "/account"];
-
-export default auth((req) => {
-  const { pathname } = req.nextUrl;
-  const isProtected = PROTECTED_PREFIXES.some((prefix) => pathname.startsWith(prefix));
-
-  if (isProtected && !req.auth) {
-    const loginUrl = new URL("/login", req.nextUrl.origin);
-    loginUrl.searchParams.set("callbackUrl", pathname);
-    return NextResponse.redirect(loginUrl);
-  }
-
-  return NextResponse.next();
-});
+// Edge-safe instance: built only from authConfig (no providers, no Prisma,
+// no bcrypt) so this bundles cleanly for Vercel's Edge Runtime.
+export default NextAuth(authConfig).auth;
 
 export const config = {
   matcher: ["/agent/:path*", "/supplier/:path*", "/admin/:path*", "/account/:path*"],
