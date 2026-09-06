@@ -34,8 +34,8 @@ export function calculateCommissionAmount(
   bookingAmount: Decimal | number,
   rule: { type: string; value: Decimal | number } | null
 ): Decimal {
-  const amount = new Decimal(bookingAmount as any);
+  const amount = new Decimal(bookingAmount);
   if (!rule) return new Decimal(0);
-  const value = new Decimal(rule.value as any);
+  const value = new Decimal(rule.value);
   return rule.type === "percentage" ? amount.mul(value).div(100) : value;
 }

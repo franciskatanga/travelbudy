@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { requireAgentOrganizationId } from "@/lib/current-org";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatMoney } from "@/lib/utils";
 
